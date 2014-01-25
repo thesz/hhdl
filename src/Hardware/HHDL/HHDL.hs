@@ -50,7 +50,7 @@ import Control.Monad.Fix
 import qualified Data.Bits as B
 import qualified Data.Bits
 import Data.IORef
-import Data.List (nub, intersperse)
+import Data.List (nub, intersperse, intercalate)
 import Data.Maybe
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -93,11 +93,12 @@ data WireE =
 		-- wire identifier. Is wire should be generated without index, does wire have name and what it is and unique index.
 		WIdent	Bool (Maybe String) Int
 	|	WConst	Integer
-	|	WConcat	SizedWire SizedWire
+	|	WConcat	SizedWireE SizedWireE
 	-- for most operations size of result is equal to sizes of arguments.
 	-- for multiplication
-	|	WBin	BinOp	SizedWire	SizedWire
-	|	WSlice	SizedWire	Int	Int
+	|	WBin	BinOp	SizedWireE	SizedWireE
+	|	WUn	UnOp	SizedWireE
+	|	WSlice	SizedWireE	Int
 	deriving (Eq, Ord, Show)
 
 data BinOp =
@@ -112,16 +113,29 @@ data BinOp =
 	|	Xor
 	deriving (Eq, Ord, Show)
 
-type SizedWire = (Int, WireOp)
+data UnOp =
+		Negate
+	|	Complement
+	|	Extend	ExtOp
+	deriving (Eq, Ord, Show)
+
+data ExtOp =
+	ExtZero | ExtSign | ExtOne
+	deriving (Eq, Ord, Show)
+
+type SizedWireE = (Int, WireE)
 
 data Wire clk ty where
-	Wire :: SizedWire -> Wire clk ty
+	Wire :: SizedWireE -> Wire clk ty
 
 instance Show (Wire c ty) where
 	show (Wire sw) = show sw
 
 data HDL = VHDL | Verilog
 	deriving (Prelude.Eq, Prelude.Ord, Show)
+
+exprFlatten :: SizedWireE -> NLM clocks SizedWireE
+exprFlatten sizedExpr = return sizedExpr
 
 {- DEL ME!!!
 class BitRepr (WireOpType op) => WireOp op where
@@ -138,6 +152,39 @@ class BitRepr (WireOpType op) => WireOp op where
 	opTypeSize :: op -> Int
 	opTypeSize op = bitVectorSize (opType op)
 -}
+
+opToHDL :: BitRepr ty => HDL -> Wire c ty -> String
+opToHDL hdl (Wire expr) = exprHDL expr
+	where
+		exprHDL (size, e) = case e of
+			WIdent	special name ix -> nameString
+				where
+					nameString = case name of
+						Nothing -> "generated_hhdl_name_"++show ix
+						Just n
+							| special -> n
+							| otherwise -> n ++"_"++ix
+
+			WConst	i -> case hdl of
+				Verilog -> error "wconst!"
+			WConcat	exprs -> case hdl of
+				Verilog -> concat ["{", concat $ intercalate ", " $ map exprHDL exprs, "}"]
+			WBin	op a b -> unwords [exprHDL a, hdlOp, exprHDL b]
+				where
+					hdlOp = case (hdl, op) of
+						_ -> error "hdlOp!"
+			WUn	op e -> case (hdl, op) of
+				(Verilog, Complement) -> "~"++exprHDL e
+				(VHDL, Complement) -> unwords ["not", exprHDL e]
+				(_, Negate) -> "-"++exprHDL e
+			WSlice	e@(len,_) from -> case hdl of
+				Verilog
+					| len < 2 -> concat [exprHDL e, "[",show from,"]"]
+					| otherwise -> concat [exprHDL e, "[",show (from+len-1),":", show from,"]"]
+				VHDL
+					| len < 2 -> concat [exprHDL e, "(",show from,")"]
+					| otherwise -> concat [exprHDL e, "[",show (from+len-1)," downto ", show from,"]"]
+
 
 data SimpleOps c ty where
 	OpConst :: (BitRepr ty, Show ty) => ty -> SimpleOps c ty
@@ -158,18 +205,18 @@ toBits x
 constant :: BitRepr ty => ty -> Wire c ty
 constant x = Wire (bitVectorSize x, WConst $ toBitVector x)
 
-simpleBinAnyHDL a op b = OpSimpleBin a (Prelude.zip [VHDL, Verilog] (repeat op)) b
+simpleBinAnyHDL a op b = (fst a, WBin op a b)
 
 instance (BitRepr ty, Arith ty, BitRepr (ArithResult ty)) => Arith (Wire c ty) where
 	type ArithResult (Wire c ty) = Wire c (ArithResult ty)
-	a .+ b = Expr $ simpleBinAnyHDL a "+" b
-	a .- b = Expr $ simpleBinAnyHDL a "-" b
-	a .* b = Expr $ simpleBinAnyHDL a "*" b
+	Wire a .+ Wire b = Wire $ simpleBinAnyHDL a Plus b
+	Wire a .- Wire b = Wire $ simpleBinAnyHDL a Minus b
+	Wire a .* Wire b = Wire $ simpleBinAnyHDL a Mul b
 
 instance Boolean (Wire c Bool) where
-	boolNot x = Expr $ OpSimpleUn [(VHDL, "not"), (Verilog, "!")] x
-	a .&& b = Expr $ OpSimpleBin a [(VHDL, "and"),(Verilog, "&&")] b
-	a .|| b = Expr $ OpSimpleBin a [(VHDL, "or"),(Verilog, "||")] b
+	boolNot (Wire x) = Wire $ WUn Complement x
+	Wire a .&& Wire b = Wire $ simpleBinAnyHDL a And b
+	Wire a .|| Wire b = Wire $ simpleBinAnyHDL a Or b
 
 
 type family WList c ts
@@ -231,10 +278,10 @@ wireBusSize wire = bitVectorSize (wireType wire)
 		wireType :: BitRepr a => Wire c a -> a
 		wireType _ = undefined
 
-wireOpBusSize :: (BitRepr (WireOpType op), WireOp op) => op -> Int
+wireOpBusSize :: (BitRepr ty) => Wire c ty -> Int
 wireOpBusSize op = bitVectorSize (projectType op)
 	where
-		projectType :: WireOp op => op -> WireOpType op
+		projectType :: Wire c ty -> ty
 		projectType = undefined
 
 instance BitRepr a => HDLSignal (Wire c a) where
@@ -852,20 +899,20 @@ assignWithForcedCopy n wire = do
 	return t
 
 assignFlattened :: (BitRepr ty) => Wire c ty -> NLM registers (Wire c ty)
-assignFlattened w@(Wire _ _) = return w
-assignFlattened (Expr op) = do
-	op <- opFlatten op
-	assignWithForcedCopy Nothing $ Expr op
+assignFlattened w@(Wire (sz, WIdent _)) = return w
+assignFlattened w@(Wire e) = do
+	e <- exprFlatten e
+	assignWithForcedCopy Nothing e
 
 extendZero :: (Nat src, Nat dest) => Wire c (BV src) -> Wire c (BV dest)
-extendZero what = Expr $ Extend False what
+extendZero (Wire what) = let r = Wire (bitVectorSize r, WUn (Extend ExtZero) what) in r
 
 extendSign :: (Nat src, Nat dest) => Wire c (BV src) -> Wire c (BV dest)
-extendSign what = Expr $ Extend True what
+extendSign (Wire what) = let r = Wire (bitVectorSize r, WUn (Extend ExtSign) what) in r
 
 castWires :: (BitRepr src, BitRepr res, BitVectorSize src ~ BitVectorSize res) =>
 	Wire c src -> Wire c res
-castWires what = Expr $ CastWires what
+castWires (Wire what) = Wire what
 
 _runPureNetlist :: NLM Nil a -> NLM clocks a
 _runPureNetlist action = do
@@ -886,10 +933,6 @@ _runPureNetlist action = do
 -------------------------------------------------------------------------------
 -- Operations for expressions.
 
-data Extend c dest where
-	-- bool flag is whether we're using sign (we are when True).
-	Extend :: (Nat src, Nat res) => Bool -> Wire c (BV src) -> Extend c (BV res)
-
 class BitRepr (WireOpListTypes a) => WireOpList a where
 	type WireOpListTypes a
 --	type WireOpListClock a
@@ -897,9 +940,9 @@ class BitRepr (WireOpListTypes a) => WireOpList a where
 instance WireOpList Nil where
 	type WireOpListTypes Nil = Nil
 	opsToHDL hdl = const []
-instance (WireOp x, WireOpList xs
-	, Nat (Plus (BitVectorSize (WireOpType x)) (BitVectorSize (WireOpListTypes xs)))) => WireOpList (x :. xs) where
-	type WireOpListTypes (x :. xs) = WireOpType x :. WireOpListTypes xs
+instance (WireOpList xs
+	, Nat (Plus (BitVectorSize x) (BitVectorSize (WireOpListTypes xs)))) => WireOpList (Wire c x :. xs) where
+	type WireOpListTypes (Wire c x :. xs) = x :. WireOpListTypes xs
 	opsToHDL hdl (a :. as) = opToHDL hdl a : opsToHDL hdl as
 
 type family SplitProjection c w
@@ -918,8 +961,8 @@ type instance SplitProjection c (a,b) = (Wire c a, Wire c b)
 instance (BitRepr a, BitRepr b, BitRepr (a,b)) => SplitWires (a,b) where
 	splitWires wab = (wa, wb)
 		where
-			wa = Expr $ SplitWiresOp wab (wireBusSize wb)
-			wb = Expr $ SplitWiresOp wab 0
+			wa = Wire (bitVectorSize wa, WSlice wab $ wireBusSize wb)
+			wb = Wire (bitVectorSize wb, WSlice wab 0)
 
 splitWires2 :: (BitRepr a, BitRepr b, BitRepr (a,b)) => Wire clk (a,b) -> (Wire clk a, Wire clk b)
 splitWires2 = splitWires
@@ -1013,7 +1056,7 @@ instance BitRepr w => WireOp (Join c w) where
 	opToHDL hdl (Join l r) = case hdl of
 		VHDL -> unwords ["(",opToHDL hdl l,"&",opToHDL hdl r,")"]
 		Verilog -> concat ["{",opToHDL hdl l,",",opToHDL hdl r,"}"]
-	opFlatten (Join l r) = liftM2 Join (assignFlattened l) (assignFlattened r)
+	sizedExpr (Join l r) = liftM2 Join (assignFlattened l) (assignFlattened r)
 
 infixr 5 &
 (&) :: (BitRepr a, BitRepr b, Nat (Plus (BitVectorSize a) (BitVectorSize b))) => Wire c a -> Wire c b -> Wire c (a :. b)
@@ -1032,7 +1075,7 @@ instance BitRepr w => WireOp (Equality c w) where
 			op = case hdl of
 				VHDL -> if eq then "=" else "/="
 				Verilog -> if eq then "==" else "!="
-	opFlatten (Equality eq l r) = liftM2 (Equality eq) (assignFlattened l) (assignFlattened r)
+	sizedExpr (Equality eq l r) = liftM2 (Equality eq) (assignFlattened l) (assignFlattened r)
 
 instance (Eq w, EqResult w ~ Bool, BitRepr w) => Eq (Wire c w) where
 	type EqResult (Wire c w) = Wire c Bool
@@ -1051,7 +1094,7 @@ instance BitRepr a => WireOp (Select c a) where
 			cv = opToHDL hdl c
 			lv = opToHDL hdl l
 			rv = opToHDL hdl r
-	opFlatten (Select c l r) = do
+	sizedExpr (Select c l r) = do
 		c <- assignFlattened c
 		l <- assignFlattened l
 		r <- assignFlattened r
