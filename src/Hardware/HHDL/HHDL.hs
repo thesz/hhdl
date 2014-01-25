@@ -123,6 +123,7 @@ instance Show (Wire c ty) where
 data HDL = VHDL | Verilog
 	deriving (Prelude.Eq, Prelude.Ord, Show)
 
+{- DEL ME!!!
 class BitRepr (WireOpType op) => WireOp op where
 	type WireOpType op
 	-- |Transformation to HDL.
@@ -136,20 +137,13 @@ class BitRepr (WireOpType op) => WireOp op where
 
 	opTypeSize :: op -> Int
 	opTypeSize op = bitVectorSize (opType op)
+-}
 
 data SimpleOps c ty where
 	OpConst :: (BitRepr ty, Show ty) => ty -> SimpleOps c ty
 	OpSimpleBin :: (BitRepr res, BitRepr arg) =>
 		Wire c arg -> [(HDL,String)] -> Wire c arg -> SimpleOps c res
 	OpSimpleUn :: (BitRepr res, BitRepr arg) => [(HDL,String)] -> Wire c arg -> SimpleOps c res
-
-instance BitRepr ty => WireOp (Wire c ty) where
-	type WireOpType (Wire c ty) = ty
-	opToHDL hdl wire = case wire of
-		Wire _ _ -> signalName wire
-		Expr e -> opToHDL hdl e
-	opFlatten w@(Wire _ _) = return w
-	opFlatten (Expr e) = liftM Expr $ opFlatten e
 
 toBits :: BitRepr ty => ty -> String
 toBits x
@@ -161,22 +155,8 @@ toBits x
 		bits = reverse $ concatMap show $ take n $ map snd $ tail $
 			iterate ((`Prelude.divMod` 2) . fst) (i,0)
 
-instance BitRepr ty => WireOp (SimpleOps c ty) where
-	type WireOpType (SimpleOps c ty) = ty
-	opToHDL hdl (OpConst x) = toBits x
-	opToHDL hdl (OpSimpleBin l ops r) = opToHDL hdl l++hdlOp++opToHDL hdl r
-		where
-			hdlOp = (" "++) $ (++" ") $
-				maybe (error $ "No op for hdl "++show hdl) Prelude.id $
-					Prelude.lookup hdl ops
-	opFlatten o@(OpConst x) = return o
-	opFlatten (OpSimpleBin l ops r) = do
-		l <- assignFlattened l
-		r <- assignFlattened r
-		return $ OpSimpleBin l ops r
-
 constant :: BitRepr ty => ty -> Wire c ty
-constant x = Wire (OpConst $ toBitVector x)
+constant x = Wire (bitVectorSize x, WConst $ toBitVector x)
 
 simpleBinAnyHDL a op b = OpSimpleBin a (Prelude.zip [VHDL, Verilog] (repeat op)) b
 
@@ -910,48 +890,6 @@ data Extend c dest where
 	-- bool flag is whether we're using sign (we are when True).
 	Extend :: (Nat src, Nat res) => Bool -> Wire c (BV src) -> Extend c (BV res)
 
-instance BitRepr res => WireOp (Extend c res) where
-	type WireOpType (Extend c res) = res
-	opToHDL hdl op@(Extend signExtendFlag arg)
-		| widen = widenExpr
-		| narrow = narrowExpr
-		| otherwise = subExpr
-		where
-			destSize = wireOpBusSize op
-			srcSize = wireOpBusSize arg
-			widen = destSize > srcSize
-			narrow = destSize > srcSize
-			delta = destSize - srcSize
-			sign = case hdl of
-				VHDL -> subExpr ++"("++show (srcSize-1)++")"
-				Verilog -> subExpr ++"["++show (srcSize-1)++"]"
-			extension = case hdl of
-				VHDL -> if signExtendFlag
-						then concat $ intersperse " & " (replicate delta sign)
-						else show (replicate delta '0')
-				Verilog -> if signExtendFlag
-						then concat $ intersperse ", " (replicate delta sign)
-						else show (replicate delta '0')
-			subExpr = opToHDL hdl arg
-			widenExpr = case hdl of
-				VHDL -> unwords [extension, subExpr]
-				Verilog -> "{"++concat [extension, ", ", subExpr]++"}"
-			narrowExpr = case hdl of
-				VHDL -> subExpr ++"("++show (destSize-1)++" downto 0)"
-	opFlatten (Extend se a) = liftM (Extend se) $ assignFlattened a
-
-data CastWires c res where
-	-- bool flag is whether we're using sign (we are when True).
-	CastWires :: (BitRepr src, BitRepr res, BitVectorSize src ~ BitVectorSize res) =>
-		Wire c src -> CastWires c res
-
-instance BitRepr res => WireOp (CastWires c res) where
-	type WireOpType (CastWires c res) = res
-	opToHDL hdl (CastWires op) = opToHDL hdl op
-	opFlatten (CastWires op) = do
-		op <- assignFlattened op
-		return $ CastWires op
-
 class BitRepr (WireOpListTypes a) => WireOpList a where
 	type WireOpListTypes a
 --	type WireOpListClock a
@@ -963,21 +901,6 @@ instance (WireOp x, WireOpList xs
 	, Nat (Plus (BitVectorSize (WireOpType x)) (BitVectorSize (WireOpListTypes xs)))) => WireOpList (x :. xs) where
 	type WireOpListTypes (x :. xs) = WireOpType x :. WireOpListTypes xs
 	opsToHDL hdl (a :. as) = opToHDL hdl a : opsToHDL hdl as
-
-data SplitWiresOp c r where
-	SplitWiresOp :: BitRepr s => Wire c s -> Int -> SplitWiresOp c r
-
-instance BitRepr r => WireOp (SplitWiresOp c r) where
-	type WireOpType (SplitWiresOp c r) = r
-	opToHDL hdl x@(SplitWiresOp wire ofs) = case hdl of
-		VHDL
-			| rSize > 1 -> unwords [subExpr, "(", show (rSize+ofs-1), "downto", show ofs, ")"]
-			| otherwise -> unwords [subExpr, "(", show ofs,")"]
-		Verilog -> error "Verilog SplitWiresOp!!!"
-		where
-			rSize = opTypeSize x
-			subExpr = opToHDL hdl wire
-	opFlatten (SplitWiresOp wire ofs) = liftM (\w -> SplitWiresOp w ofs) $ assignFlattened wire
 
 type family SplitProjection c w
 class BitRepr w => SplitWires w where
