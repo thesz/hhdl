@@ -1,6 +1,6 @@
 {-# LANGUAGE RankNTypes, GADTs, TypeFamilies, TypeOperators, TemplateHaskell #-}
 {-# LANGUAGE FlexibleInstances, FlexibleContexts, UndecidableInstances #-}
-{-# LANGUAGE MultiParamTypeClasses, OverlappingInstances, NoImplicitPrelude #-}
+{-# LANGUAGE MultiParamTypeClasses, OverlappingInstances #-}
 {-# LANGUAGE DoRec #-}
 -- {-# LANGUAGE NoMonomorphismRestriction #-}
 
@@ -43,17 +43,6 @@ module Hardware.HHDL.HHDL(
 	, pJust, mkJust, pNothing, mkNothing	-- generated for Maybe.
 	, pLeft, mkLeft, pRight, mkRight	-- generated for Maybe.
 	) where
-
--- what we need from Prelude:
-import Prelude
-	( putStrLn, ($), (.), IO, (++), String, repeat, zipWith, head
-	, fst, snd, length, map, Show(..), reverse, Int, Integer, flip, filter
-	, unwords, unlines, replicate, const, undefined, error, Ordering(..)
-	, concat, concatMap, take, tail, iterate, Bool(..), Monad(..)
-	, writeFile, otherwise, asTypeOf
-	, foldr, foldl, foldl1, zipWith3, zip, init, Maybe(..), Either(..))
-
-import qualified Prelude
 
 import Control.Monad.State
 import Control.Monad
@@ -100,12 +89,36 @@ createUniqueIndex mk n = unsafePerformIO $ do
 -------------------------------------------------------------------------------
 -- What is wire.
 
+data WireE =
+		-- wire identifier. Is wire should be generated without index, does wire have name and what it is and unique index.
+		WIdent	Bool (Maybe String) Int
+	|	WConst	Integer
+	|	WConcat	SizedWire SizedWire
+	-- for most operations size of result is equal to sizes of arguments.
+	-- for multiplication
+	|	WBin	BinOp	SizedWire	SizedWire
+	|	WSlice	SizedWire	Int	Int
+	deriving (Eq, Ord, Show)
+
+data BinOp =
+		Plus
+	|	Minus
+	|	Mul
+	|	ShiftRL
+	|	ShiftRA
+	|	ShiftL
+	|	And
+	|	Or
+	|	Xor
+	deriving (Eq, Ord, Show)
+
+type SizedWire = (Int, WireOp)
+
 data Wire clk ty where
-	Wire :: Maybe String -> Int -> Wire clk ty
-	Expr :: WireOp (op c ty) => op c ty -> Wire c ty
+	Wire :: SizedWire -> Wire clk ty
 
 instance Show (Wire c ty) where
-	show w = error "No show for wires right now!"
+	show (Wire sw) = show sw
 
 data HDL = VHDL | Verilog
 	deriving (Prelude.Eq, Prelude.Ord, Show)
@@ -162,21 +175,21 @@ instance BitRepr ty => WireOp (SimpleOps c ty) where
 		r <- assignFlattened r
 		return $ OpSimpleBin l ops r
 
-instance (Show ty, BitRepr ty, IntegerConstant ty) => IntegerConstant (Wire c ty) where
-	fromInteger i = Expr (OpConst (fromInteger i))
+constant :: BitRepr ty => ty -> Wire c ty
+constant x = Wire (OpConst $ toBitVector x)
 
 simpleBinAnyHDL a op b = OpSimpleBin a (Prelude.zip [VHDL, Verilog] (repeat op)) b
 
 instance (BitRepr ty, Arith ty, BitRepr (ArithResult ty)) => Arith (Wire c ty) where
 	type ArithResult (Wire c ty) = Wire c (ArithResult ty)
-	a + b = Expr $ simpleBinAnyHDL a "+" b
-	a - b = Expr $ simpleBinAnyHDL a "-" b
-	a * b = Expr $ simpleBinAnyHDL a "*" b
+	a .+ b = Expr $ simpleBinAnyHDL a "+" b
+	a .- b = Expr $ simpleBinAnyHDL a "-" b
+	a .* b = Expr $ simpleBinAnyHDL a "*" b
 
 instance Boolean (Wire c Bool) where
-	not x = Expr $ OpSimpleUn [(VHDL, "not"), (Verilog, "!")] x
-	a && b = Expr $ OpSimpleBin a [(VHDL, "and"),(Verilog, "&&")] b
-	a || b = Expr $ OpSimpleBin a [(VHDL, "or"),(Verilog, "||")] b
+	boolNot x = Expr $ OpSimpleUn [(VHDL, "not"), (Verilog, "!")] x
+	a .&& b = Expr $ OpSimpleBin a [(VHDL, "and"),(Verilog, "&&")] b
+	a .|| b = Expr $ OpSimpleBin a [(VHDL, "or"),(Verilog, "||")] b
 
 
 type family WList c ts
@@ -349,9 +362,6 @@ mkWire name = do
 tempWire :: BitRepr a => NLM clocked (Wire c a)
 tempWire = mkWire Nothing
 
-constant :: (BitRepr a, Show a) => a -> Wire c a
-constant c = Expr $ OpConst c
-
 class (ClockList (EntityClocks entity)
 	, HDLSignals (EntityIns entity)
 	, HDLSignals (EntityOuts entity)
@@ -459,14 +469,14 @@ mkMealy defs n f = mkMealyNamed Nothing defs n f
 
 instance BitRepr Int where
 	type BitVectorSize Int = $(tySize 32)
-	toBitVector x = convertThroughInteger x
-	fromBitVector x = convertThroughInteger x
+	toBitVector x = fromIntegral x
+	fromBitVector x = fromIntegral x
 	bitVectorSize x = 32
 
 instance BitRepr Word8 where
 	type BitVectorSize Word8 = $(tySize 8)
-	toBitVector x = convertThroughInteger x
-	fromBitVector x = convertThroughInteger x
+	toBitVector x = fromIntegral x
+	fromBitVector x = fromIntegral x
 	bitVectorSize x = 8
 
 instance BitRepr Nil where
@@ -808,9 +818,6 @@ instance Nat size => BitRepr (BV size) where
 		where
 			r = BV (i B..&. bitMask r)
 
-instance Nat size => IntegerConstant (BV size) where
-	fromInteger i = fromBitVector i
-
 instance Show (BV size) where
 	showsPrec n (BV i) = (concat [o,Text.Printf.printf "BV 0x%x" i,c]++)
 		where
@@ -818,10 +825,10 @@ instance Show (BV size) where
 				| n > 10 = ("(",")")
 				| otherwise = ("","")
 
-instance Nat size => Eq (BV size) where
+instance Nat size => Equal (BV size) where
 	type EqResult (BV size) = Bool
-	a == b = toBitVector a == toBitVector b
-	a /= b = toBitVector a /= toBitVector b
+	a .== b = toBitVector a .== toBitVector b
+	a ./= b = toBitVector a ./= toBitVector b
 
 _toSelBusSizeBitVector :: AlgTypeBitEnc a => a -> BV (SelectorBusSize a)
 _toSelBusSizeBitVector = undefined
