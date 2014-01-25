@@ -1,7 +1,7 @@
 {-# LANGUAGE RankNTypes, GADTs, TypeFamilies, TypeOperators, TemplateHaskell #-}
 {-# LANGUAGE FlexibleInstances, FlexibleContexts, UndecidableInstances #-}
 {-# LANGUAGE MultiParamTypeClasses, OverlappingInstances #-}
-{-# LANGUAGE DoRec #-}
+{-# LANGUAGE RecursiveDo #-}
 -- {-# LANGUAGE NoMonomorphismRestriction #-}
 
 module Hardware.HHDL.HHDL(
@@ -93,12 +93,13 @@ data WireE =
 		-- wire identifier. Is wire should be generated without index, does wire have name and what it is and unique index.
 		WIdent	Bool (Maybe String) Int
 	|	WConst	Integer
-	|	WConcat	SizedWireE SizedWireE
+	|	WConcat	[SizedWireE]
 	-- for most operations size of result is equal to sizes of arguments.
 	-- for multiplication
 	|	WBin	BinOp	SizedWireE	SizedWireE
 	|	WUn	UnOp	SizedWireE
 	|	WSlice	SizedWireE	Int
+	|	WSelect	SizedWireE	SizedWireE	SizedWireE
 	deriving (Eq, Ord, Show)
 
 data BinOp =
@@ -111,6 +112,8 @@ data BinOp =
 	|	And
 	|	Or
 	|	Xor
+	|	Equal
+	|	NEqual
 	deriving (Eq, Ord, Show)
 
 data UnOp =
@@ -290,8 +293,8 @@ instance BitRepr a => HDLSignal (Wire c a) where
 			kind = if width == 1 then BitSignal else BusSignal width
 			width = wireBusSize wire
 			name = case wire of
-				Wire Nothing i -> "generated_temporary_name_"++show i
-				Wire (Just n) i -> concat [n,"_",show i]
+				Wire (WIdent _ Nothing i) -> "generated_temporary_name_"++show i
+				Wire (WIdent special (Just n) i) -> concat [n,"_",show i]
 
 
 class HDLSignals a where
@@ -899,7 +902,7 @@ assignWithForcedCopy n wire = do
 	return t
 
 assignFlattened :: (BitRepr ty) => Wire c ty -> NLM registers (Wire c ty)
-assignFlattened w@(Wire (sz, WIdent _)) = return w
+assignFlattened w@(Wire (sz, WIdent _ _ _)) = return w
 assignFlattened w@(Wire e) = do
 	e <- exprFlatten e
 	assignWithForcedCopy Nothing e
@@ -1051,57 +1054,17 @@ _castArgsWires a w = r
 data Join c w where
 	Join :: (BitRepr a, BitRepr b) => Wire c a -> Wire c b -> Join c (a :. b)
 
-instance BitRepr w => WireOp (Join c w) where
-	type WireOpType (Join c w) = w
-	opToHDL hdl (Join l r) = case hdl of
-		VHDL -> unwords ["(",opToHDL hdl l,"&",opToHDL hdl r,")"]
-		Verilog -> concat ["{",opToHDL hdl l,",",opToHDL hdl r,"}"]
-	sizedExpr (Join l r) = liftM2 Join (assignFlattened l) (assignFlattened r)
-
 infixr 5 &
 (&) :: (BitRepr a, BitRepr b, Nat (Plus (BitVectorSize a) (BitVectorSize b))) => Wire c a -> Wire c b -> Wire c (a :. b)
-a & b = Expr $ Join a b
+(Wire a) & (Wire b) = Wire $ (fst a+fst b, WConcat [a,b])
 
-data Equality c w where
-	-- first is the flag for equality testing, if true.
-	Equality :: BitRepr w => Bool -> Wire c w -> Wire c w -> Equality c Bool
-
-instance BitRepr w => WireOp (Equality c w) where
-	type WireOpType (Equality c w) = w
-	opToHDL hdl (Equality eq l r) = case hdl of
-		VHDL -> concat ["bit_equality( ", opToHDL hdl l,", ", opToHDL hdl r,")"]
-		Verilog -> error "Equality Verilog!!!"
-		where
-			op = case hdl of
-				VHDL -> if eq then "=" else "/="
-				Verilog -> if eq then "==" else "!="
-	sizedExpr (Equality eq l r) = liftM2 (Equality eq) (assignFlattened l) (assignFlattened r)
-
-instance (Eq w, EqResult w ~ Bool, BitRepr w) => Eq (Wire c w) where
+instance (Eq w, EqResult w ~ Bool, BitRepr w) => Equal (Wire c w) where
 	type EqResult (Wire c w) = Wire c Bool
-	a == b = Expr $ Equality True  a b
-	a /= b = Expr $ Equality False a b
-
-data Select c w where
-	Select :: Wire c Bool -> Wire c a -> Wire c a -> Select c a
-
-instance BitRepr a => WireOp (Select c a) where
-	type WireOpType (Select c a) = a
-	opToHDL hdl (Select c l r) = case hdl of
-		VHDL -> concat["select_func(",cv, ", ", lv,", ",rv,")"]
-		Verilog -> error "Verilog Select!!!"
-		where
-			cv = opToHDL hdl c
-			lv = opToHDL hdl l
-			rv = opToHDL hdl r
-	sizedExpr (Select c l r) = do
-		c <- assignFlattened c
-		l <- assignFlattened l
-		r <- assignFlattened r
-		return $ Select c l r
+	Wire a .== Wire b = Wire $ WBin Equal a b
+	Wire a ./= Wire b = Wire $ WBin NEqual a b
 
 selectWires :: BitRepr a => Wire c Bool -> Wire c a -> Wire c a -> Wire c a
-selectWires sel true false = Expr $ Select sel true false
+selectWires (Wire sel) (Wire true) (Wire false) = Wire $ WSelect sel true false
 
 -------------------------------------------------------------------------------
 -- Pattern matching.
