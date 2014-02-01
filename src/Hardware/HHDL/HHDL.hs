@@ -1162,5 +1162,5 @@ pwild :: BitRepr a => Pattern (Wire c a) Nil
 pwild = Pattern $ \w -> return (Nil, constant True)
 
 -- Pattern matching for some Prelude types.
--- $(reifyGenerateMakeMatch [''Maybe, ''Either, ''Bool])
-$(reifyGenerateMakeMatch [''Bool])
+$(reifyGenerateMakeMatch [''Maybe, ''Either, ''Bool])
+-- $(reifyGenerateMakeMatch [''Bool])

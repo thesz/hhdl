@@ -116,7 +116,7 @@ generateConMakeMatch dataName args selectorIndex c@(NormalC conName types) = do
 			, [returnStat $ TupE [concatWLs mrs, resultingCondV]]
 			]
 			where
-				and a b = InfixE (Just a) (VarE $ mkName "&&") (Just b)
+				and a b = InfixE (Just a) (VarE $ mkName ".&&") (Just b)
 				concatWL a = VarE (mkName "concatWiresList") `AppE` a
 				concatWLs vs = concatWL $ foldr consE nil $ map VarE mrs
 		matchTypeD = SigD matchName matchType
