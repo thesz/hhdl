@@ -7,7 +7,7 @@ Name:                HHDL
 -- The package version. See the Haskell package versioning policy
 -- (http://www.haskell.org/haskellwiki/Package_versioning_policy) for
 -- standards guiding when and how versions should be incremented.
-Version:             0.1.0.0
+Version:             0.2.0.0
 
 -- A short (one-line) description of the package.
 Synopsis:            Hardware Description Language embedded in Haskell.
@@ -62,9 +62,9 @@ Library
   hs-source-dirs:      src
 
   -- Packages needed in order to build this package.
-  Build-depends:       base >= 3.0 && < 4.0,
-                       template-haskell >= 2.4 && < 2.5,
-                       containers >= 0.3 && < 0.4,
+  Build-depends:       base >= 3.0,
+                       template-haskell >= 2.4,
+                       containers >= 0.3 ,
                        mtl >= 1.1
   
   -- Modules not exported by this package.

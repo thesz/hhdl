@@ -13,8 +13,8 @@ import Data.Word
 infixl 6 .+, .-
 infixl 7 .*
 class Arith op where
-	type ArithResult op
-	(.+), (.-), (.*) :: op -> op -> ArithResult op
+	fromIntegerLit :: Integer -> op
+	(.+), (.-), (.*) :: op -> op -> op
 
 infix 4 .==, ./=
 class Equal a where
@@ -41,13 +41,7 @@ instance Boolean Bool where
 	(.||) = (||)
 
 instance Arith Int where
-	type ArithResult Int = Int
-	(.+) = (+)
-	(.-) = (-)
-	(.*) = (*)
-
-instance Arith Integer where
-	type ArithResult Integer = Integer
+	fromIntegerLit = fromInteger
 	(.+) = (+)
 	(.-) = (-)
 	(.*) = (*)
@@ -69,7 +63,7 @@ instance Compare Int Bool where
 	(.<=) = (<=)
 
 instance Arith Word8 where
-	type ArithResult Word8 = Word8
+	fromIntegerLit = fromInteger
 	(.+) = (+)
 	(.-) = (-)
 	(.*) = (*)

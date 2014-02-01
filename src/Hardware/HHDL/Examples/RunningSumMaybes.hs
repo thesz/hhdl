@@ -47,7 +47,7 @@ runningSumMaybes = mkMealyNamed
 		, pNothing --> \Nil -> return (constant 0)
 		]
         -- compute the sum.
-	nextSum <- assignWire (sum + a)
+	nextSum <- assignWire (sum .+ a)
         -- return currently locked sum.
 	return (nextSum :. Nil, sum :. Nil)
 

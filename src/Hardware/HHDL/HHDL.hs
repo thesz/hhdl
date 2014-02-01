@@ -40,8 +40,8 @@ module Hardware.HHDL.HHDL(
 	, match			-- match expression against list of patterns.
 	, (-->)			-- combine pattern and netlists.
 	, pvar, pcst, pwild	-- variable match, constant match, wildcard match.
---	, pJust, mkJust, pNothing, mkNothing	-- generated for Maybe.
---	, pLeft, mkLeft, pRight, mkRight	-- generated for Maybe.
+	, pJust, mkJust, pNothing, mkNothing	-- generated for Maybe.
+	, pLeft, mkLeft, pRight, mkRight	-- generated for Maybe.
 	) where
 
 import Control.Monad.State
@@ -216,8 +216,8 @@ constant x = Wire (bitVectorSize x, WConst $ toBitVector x)
 
 simpleBinAnyHDL a op b = (fst a, WBin op a b)
 
-instance (BitRepr ty, Arith ty, BitRepr (ArithResult ty)) => Arith (Wire c ty) where
-	type ArithResult (Wire c ty) = Wire c (ArithResult ty)
+instance (BitRepr ty, Arith ty) => Arith (Wire c ty) where
+	fromIntegerLit l = constant $ fromBitVector l
 	Wire a .+ Wire b = Wire $ simpleBinAnyHDL a Plus b
 	Wire a .- Wire b = Wire $ simpleBinAnyHDL a Minus b
 	Wire a .* Wire b = Wire $ simpleBinAnyHDL a Mul b
