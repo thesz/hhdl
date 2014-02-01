@@ -109,8 +109,8 @@ generateConMakeMatch dataName args selectorIndex c@(NormalC conName types) = do
 		matchStats = concat [
 			  [LetS [ValD (TupP [cP,asP]) (NormalB constructorSplit) []]]
 			, splitAssign
-			--, [BindS conpP (VarE (mkName "assignWire") `AppE` (VarE (mkName "_fixAsBoolWire") `AppE` (InfixE (Just cV) (VarE $ mkName "==") (Just $ VarE (mkName "asTypeOf") `AppE` (LitE $ IntegerL $ fromIntegral selectorIndex) `AppE` cV ))))]
-			, [assignWire conpP (InfixE (Just cV) (VarE $ mkName "==") (Just $ VarE (mkName "asTypeOf") `AppE` (LitE $ IntegerL $ fromIntegral selectorIndex) `AppE` cV ))]
+			--, [BindS conpP (VarE (mkName "assignWire") `AppE` (VarE (mkName "_fixAsBoolWire") `AppE` (InfixE (Just cV) (VarE $ mkName ".==") (Just $ VarE (mkName "asTypeOf") `AppE` (LitE $ IntegerL $ fromIntegral selectorIndex) `AppE` cV ))))]
+			, [assignWire conpP (InfixE (Just cV) (VarE $ mkName ".==") (Just $ VarE (mkName "asTypeOf") `AppE` (AppE (VarE (mkName "constant")) $ LitE $ IntegerL $ fromIntegral selectorIndex) `AppE` cV ))]
 			, map argMatch $ zip4 argNames aws mrs mcs
 			, [assignWire resultingCondP $ foldr and conpV $ map VarE mcs]
 			, [returnStat $ TupE [concatWLs mrs, resultingCondV]]

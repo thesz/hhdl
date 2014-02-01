@@ -40,8 +40,8 @@ module Hardware.HHDL.HHDL(
 	, match			-- match expression against list of patterns.
 	, (-->)			-- combine pattern and netlists.
 	, pvar, pcst, pwild	-- variable match, constant match, wildcard match.
-	, pJust, mkJust, pNothing, mkNothing	-- generated for Maybe.
-	, pLeft, mkLeft, pRight, mkRight	-- generated for Maybe.
+--	, pJust, mkJust, pNothing, mkNothing	-- generated for Maybe.
+--	, pLeft, mkLeft, pRight, mkRight	-- generated for Maybe.
 	) where
 
 import Control.Monad.State
@@ -140,6 +140,12 @@ data HDL = VHDL | Verilog
 exprFlatten :: SizedWireE -> NLM clocks SizedWireE
 exprFlatten sizedExpr = return sizedExpr
 
+mkWireFromE :: BitRepr a => WireE -> Wire c a
+mkWireFromE e = r
+	where
+		r = Wire (size, e)
+		size = wireBusSize r
+
 {- DEL ME!!!
 class BitRepr (WireOpType op) => WireOp op where
 	type WireOpType op
@@ -166,12 +172,12 @@ opToHDL hdl (Wire expr) = exprHDL expr
 						Nothing -> "generated_hhdl_name_"++show ix
 						Just n
 							| special -> n
-							| otherwise -> n ++"_"++ix
+							| otherwise -> n ++"_"++show ix
 
 			WConst	i -> case hdl of
 				Verilog -> error "wconst!"
 			WConcat	exprs -> case hdl of
-				Verilog -> concat ["{", concat $ intercalate ", " $ map exprHDL exprs, "}"]
+				Verilog -> concat ["{", intercalate ", " $ map exprHDL exprs, "}"]
 			WBin	op a b -> unwords [exprHDL a, hdlOp, exprHDL b]
 				where
 					hdlOp = case (hdl, op) of
@@ -217,7 +223,7 @@ instance (BitRepr ty, Arith ty, BitRepr (ArithResult ty)) => Arith (Wire c ty) w
 	Wire a .* Wire b = Wire $ simpleBinAnyHDL a Mul b
 
 instance Boolean (Wire c Bool) where
-	boolNot (Wire x) = Wire $ WUn Complement x
+	boolNot (Wire x) = mkWireFromE $ WUn Complement x
 	Wire a .&& Wire b = Wire $ simpleBinAnyHDL a And b
 	Wire a .|| Wire b = Wire $ simpleBinAnyHDL a Or b
 
@@ -293,8 +299,8 @@ instance BitRepr a => HDLSignal (Wire c a) where
 			kind = if width == 1 then BitSignal else BusSignal width
 			width = wireBusSize wire
 			name = case wire of
-				Wire (WIdent _ Nothing i) -> "generated_temporary_name_"++show i
-				Wire (WIdent special (Just n) i) -> concat [n,"_",show i]
+				Wire (_, WIdent _ Nothing i) -> "generated_temporary_name_"++show i
+				Wire (_, WIdent special (Just n) i) -> concat [n,"_",show i]
 
 
 class HDLSignals a where
@@ -387,7 +393,7 @@ mkWire :: BitRepr a => Maybe String -> NLM clocked (Wire c a)
 mkWire name = do
 	n <- liftM nlmsCounter get
 	modify $ \nlms -> nlms { nlmsCounter = n+1 }
-	return $ Wire name n
+	return $ mkWireFromE $ WIdent False name n
 
 tempWire :: BitRepr a => NLM clocked (Wire c a)
 tempWire = mkWire Nothing
@@ -848,6 +854,16 @@ instance Nat size => BitRepr (BV size) where
 		where
 			r = BV (i B..&. bitMask r)
 
+instance Nat size => Num (BV size) where
+	fromInteger x = BV x
+	BV a + BV b = BV $ a + b
+	BV a - BV b = BV $ a - b
+	BV a * BV b = BV $ a * b
+
+instance Nat size => Eq (BV size) where
+	BV a == BV b = a == b
+	BV a /= BV b = a /= b
+
 instance Show (BV size) where
 	showsPrec n (BV i) = (concat [o,Text.Printf.printf "BV 0x%x" i,c]++)
 		where
@@ -905,13 +921,13 @@ assignFlattened :: (BitRepr ty) => Wire c ty -> NLM registers (Wire c ty)
 assignFlattened w@(Wire (sz, WIdent _ _ _)) = return w
 assignFlattened w@(Wire e) = do
 	e <- exprFlatten e
-	assignWithForcedCopy Nothing e
+	assignWithForcedCopy Nothing (Wire e)
 
 extendZero :: (Nat src, Nat dest) => Wire c (BV src) -> Wire c (BV dest)
-extendZero (Wire what) = let r = Wire (bitVectorSize r, WUn (Extend ExtZero) what) in r
+extendZero (Wire what) = mkWireFromE (WUn (Extend ExtZero) what)
 
 extendSign :: (Nat src, Nat dest) => Wire c (BV src) -> Wire c (BV dest)
-extendSign (Wire what) = let r = Wire (bitVectorSize r, WUn (Extend ExtSign) what) in r
+extendSign (Wire what) = mkWireFromE (WUn (Extend ExtSign) what)
 
 castWires :: (BitRepr src, BitRepr res, BitVectorSize src ~ BitVectorSize res) =>
 	Wire c src -> Wire c res
@@ -943,7 +959,7 @@ class BitRepr (WireOpListTypes a) => WireOpList a where
 instance WireOpList Nil where
 	type WireOpListTypes Nil = Nil
 	opsToHDL hdl = const []
-instance (WireOpList xs
+instance (WireOpList xs, BitRepr x
 	, Nat (Plus (BitVectorSize x) (BitVectorSize (WireOpListTypes xs)))) => WireOpList (Wire c x :. xs) where
 	type WireOpListTypes (Wire c x :. xs) = x :. WireOpListTypes xs
 	opsToHDL hdl (a :. as) = opToHDL hdl a : opsToHDL hdl as
@@ -962,15 +978,15 @@ instance (BitRepr a, BitRepr b, Nat (Plus (BitVectorSize a) (BitVectorSize b)), 
 
 type instance SplitProjection c (a,b) = (Wire c a, Wire c b)
 instance (BitRepr a, BitRepr b, BitRepr (a,b)) => SplitWires (a,b) where
-	splitWires wab = (wa, wb)
+	splitWires (Wire wab) = (wa, wb)
 		where
-			wa = Wire (bitVectorSize wa, WSlice wab $ wireBusSize wb)
-			wb = Wire (bitVectorSize wb, WSlice wab 0)
+			wa = Wire (wireBusSize wa, WSlice wab $ wireBusSize wb)
+			wb = Wire (wireBusSize wb, WSlice wab 0)
 
 splitWires2 :: (BitRepr a, BitRepr b, BitRepr (a,b)) => Wire clk (a,b) -> (Wire clk a, Wire clk b)
 splitWires2 = splitWires
 
-$(liftM concat $ forM [3..8] $ \n -> let
+$(liftM concat $ forM [3..4] $ \n -> let
 		typeNames' = map (\i -> TH.mkName ("t_"++show i)) [1..n]
 		typeNames = map TH.VarT typeNames'
 		ty = foldl TH.AppT (TH.TupleT n) typeNames
@@ -989,7 +1005,7 @@ $(liftM concat $ forM [3..8] $ \n -> let
 		prevArgs = Prelude.scanr (:) [] argVars
 		sumWidths ws = foldr (\a b -> TH.InfixE (Just a) (TH.VarE $ TH.mkName "+") (Just b)) (TH.LitE $ TH.IntegerL 0) $ map (TH.AppE (TH.VarE (TH.mkName "wireBusSize"))) ws
 		def v widths = flip (TH.ValD (TH.VarP v)) [] $ TH.NormalB $
-			TH.ConE 'Wire `TH.AppE`
+			TH.VarE 'mkWireFromE `TH.AppE`
 			(TH.ConE 'WSlice
 				`TH.AppE` vV `TH.AppE` sumWidths widths)
 		defs = zipWith def argNames (tail prevArgs)
@@ -1060,11 +1076,11 @@ infixr 5 &
 
 instance (Eq w, EqResult w ~ Bool, BitRepr w) => Equal (Wire c w) where
 	type EqResult (Wire c w) = Wire c Bool
-	Wire a .== Wire b = Wire $ WBin Equal a b
-	Wire a ./= Wire b = Wire $ WBin NEqual a b
+	Wire a .== Wire b = mkWireFromE $ WBin Equal a b
+	Wire a ./= Wire b = mkWireFromE $ WBin NEqual a b
 
 selectWires :: BitRepr a => Wire c Bool -> Wire c a -> Wire c a -> Wire c a
-selectWires (Wire sel) (Wire true) (Wire false) = Wire $ WSelect sel true false
+selectWires (Wire sel) (Wire true) (Wire false) = mkWireFromE $ WSelect sel true false
 
 -------------------------------------------------------------------------------
 -- Pattern matching.
@@ -1119,7 +1135,7 @@ match v ms = do
 			let pm = PatMatch $ \v -> do
 				(f1,r1) <- pm1 v
 				(f2,r2) <- pm2 v
-				fw <- assignWire $ f1 || f2
+				fw <- assignWire $ f1 .|| f2
 				sw <- assignWire $ selectWires f1 r1 r2
 				return (fw, sw)
 			pms' <- reduceMatchesByTwo pms
@@ -1135,7 +1151,7 @@ infixl 8 -->
 
 -- |Constant match.
 pcst :: (Eq a, EqResult a ~ Bool, Eq (Wire c a), Show a, BitRepr a) => a -> Pattern (Wire c a) Nil
-pcst c = Pattern $ \w -> return (Nil, w == constant c)
+pcst c = Pattern $ \w -> return (Nil, w .== constant c)
 
 pvar :: BitRepr a => Pattern (Wire c a) (Wire c a :. Nil)
 pvar = Pattern $ \w -> return (w :. Nil, constant True)
@@ -1144,4 +1160,5 @@ pwild :: BitRepr a => Pattern (Wire c a) Nil
 pwild = Pattern $ \w -> return (Nil, constant True)
 
 -- Pattern matching for some Prelude types.
-$(reifyGenerateMakeMatch [''Maybe, ''Either, ''Bool])
+-- $(reifyGenerateMakeMatch [''Maybe, ''Either, ''Bool])
+$(reifyGenerateMakeMatch [''Bool])
