@@ -17,7 +17,7 @@ module Hardware.HHDL.HHDL(
 	, (:.)(..), Nil(Nil)	-- our own HList.
 	, Wire			-- abstract type.
 	, HDL(..)		-- what kind of HDL you want to generate.
-	, WireOp(..)		-- the means to extend operations.
+--	, WireOp(..)		-- the means to extend operations.
 	, toBits		-- a method to get bit vector from a type.
 	, WList
 	, WiresList		-- a class that defines list of wires.
@@ -859,6 +859,8 @@ instance Nat size => Num (BV size) where
 	BV a + BV b = BV $ a + b
 	BV a - BV b = BV $ a - b
 	BV a * BV b = BV $ a * b
+	abs = error "no abs for BV"
+	signum = error "no signum for BV"
 
 instance Nat size => Eq (BV size) where
 	BV a == BV b = a == b
@@ -1044,7 +1046,7 @@ $(liftM concat $ forM [3..4] $ \n -> let
 		fromBV = TH.FunD (TH.mkName "fromBitVector")
 			[TH.Clause [TH.VarP vN] (TH.NormalB fromBVE) fromBVEShiftDefs]
 		split = TH.FunD (TH.mkName "splitWires")
-			[TH.Clause [TH.VarP vN] (TH.NormalB $ TH.TupE argVars) defs]
+			[TH.Clause [TH.ConP 'Wire [TH.VarP vN]] (TH.NormalB $ TH.TupE argVars) defs]
 		specializedSplitN = TH.mkName $ "splitWires"++show n
 		decls = [ TH.InstanceD swCxt (TH.ConT (TH.mkName "SplitWires") `TH.AppT` ty) [split]
 			, TH.TySynInstD (TH.mkName "SplitProjection") [clk,ty] wiresTy
@@ -1053,7 +1055,7 @@ $(liftM concat $ forM [3..4] $ \n -> let
 			, TH.FunD specializedSplitN [TH.Clause [] (TH.NormalB $ TH.VarE (TH.mkName "splitWires")) []]
 			]
 	in do
---		runIO $ mapM (putStrLn . show . ppr) decls
+--		TH.runIO $ mapM (putStrLn . show . TH.ppr) decls
 		return decls
  )
 
