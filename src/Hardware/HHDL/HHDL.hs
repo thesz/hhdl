@@ -989,8 +989,8 @@ $(liftM concat $ forM [3..8] $ \n -> let
 		prevArgs = Prelude.scanr (:) [] argVars
 		sumWidths ws = foldr (\a b -> TH.InfixE (Just a) (TH.VarE $ TH.mkName "+") (Just b)) (TH.LitE $ TH.IntegerL 0) $ map (TH.AppE (TH.VarE (TH.mkName "wireBusSize"))) ws
 		def v widths = flip (TH.ValD (TH.VarP v)) [] $ TH.NormalB $
-			TH.ConE (TH.mkName "Expr") `TH.AppE`
-			(TH.ConE (TH.mkName "SplitWiresOp")
+			TH.ConE 'Wire `TH.AppE`
+			(TH.ConE 'WSlice
 				`TH.AppE` vV `TH.AppE` sumWidths widths)
 		defs = zipWith def argNames (tail prevArgs)
 		vN = TH.mkName "v"
