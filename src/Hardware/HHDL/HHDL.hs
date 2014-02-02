@@ -162,9 +162,12 @@ class BitRepr (WireOpType op) => WireOp op where
 	opTypeSize op = bitVectorSize (opType op)
 -}
 
-opToHDL :: BitRepr ty => HDL -> Wire c ty -> String
-opToHDL hdl (Wire expr) = exprHDL expr
+opToHDL :: HDL -> SizedWireE -> String
+opToHDL hdl expr = exprHDL expr
 	where
+		bits n b
+			| n < 1 = ""
+			| otherwise = bits (n-1) (div b 2) ++ show (mod b 2)
 		exprHDL (size, e) = case e of
 			WIdent	special name ix -> nameString
 				where
@@ -176,16 +179,32 @@ opToHDL hdl (Wire expr) = exprHDL expr
 
 			WConst	i -> case hdl of
 				Verilog -> error "wconst!"
+				VHDL -> show $ bits size i
 			WConcat	exprs -> case hdl of
 				Verilog -> concat ["{", intercalate ", " $ map exprHDL exprs, "}"]
 			WBin	op a b -> unwords [exprHDL a, hdlOp, exprHDL b]
 				where
 					hdlOp = case (hdl, op) of
-						_ -> error "hdlOp!"
+						(_,Plus) -> "+"
+						(_,Minus) -> "-"
+						(_,Mul) -> "*"
+						(VHDL, Or) -> "or"
+						(Verilog, Or) -> "|"
+						(VHDL, And) -> "and"
+						(Verilog, And) -> "&"
+						(VHDL, Equal) -> "="
+						(Verilog, Equal) -> "=="
+						(VHDL, NEqual) -> "/="
+						(Verilog, NEqual) -> "!="
+						e -> error $ "unhandled binary op "++show e
 			WUn	op e -> case (hdl, op) of
 				(Verilog, Complement) -> "~"++exprHDL e
 				(VHDL, Complement) -> unwords ["not", exprHDL e]
 				(_, Negate) -> "-"++exprHDL e
+				(VHDL, Extend ExtZero) -> concat ["extend_zero(",exprHDL e, ", ", show size,")"]
+				(VHDL, Extend ExtSign) -> concat ["extend_sign(",exprHDL e, ", ", show size,")"]
+				(VHDL, Extend ExtOne) -> concat ["extend_one(",exprHDL e, ", ", show size,")"]
+				e -> error $ "unhandled extension combination "++show e
 			WSlice	e@(len,_) from -> case hdl of
 				Verilog
 					| len < 2 -> concat [exprHDL e, "[",show from,"]"]
@@ -193,6 +212,11 @@ opToHDL hdl (Wire expr) = exprHDL expr
 				VHDL
 					| len < 2 -> concat [exprHDL e, "(",show from,")"]
 					| otherwise -> concat [exprHDL e, "[",show (from+len-1)," downto ", show from,"]"]
+			WSelect	c t e -> case hdl of
+				Verilog -> unwords [exprHDL c,"?", exprHDL t,":", exprHDL e]
+				VHDL -> concat ["select_func(",exprHDL c,", ", exprHDL t,", ", exprHDL e,")"]
+			e -> error $ "Unknown expression "++show e
+
 
 
 data SimpleOps c ty where
@@ -272,13 +296,11 @@ instance (Show a, BitRepr a, ClockAllowed c clocks, RegisterWiresList as clocks)
 
 data SignalKind = BitSignal | BusSignal Int deriving Show
 
-class HDLSignal a where
-	signalNameKind :: a -> (String, SignalKind)
 
-signalName :: HDLSignal a => a -> String
+signalName :: SizedWireE -> String
 signalName = fst . signalNameKind
 
-signalKind :: HDLSignal a => a -> SignalKind
+signalKind :: SizedWireE -> SignalKind
 signalKind = snd . signalNameKind
 
 wireBusSize :: BitRepr a => Wire c a -> Int
@@ -293,22 +315,19 @@ wireOpBusSize op = bitVectorSize (projectType op)
 		projectType :: Wire c ty -> ty
 		projectType = undefined
 
-instance BitRepr a => HDLSignal (Wire c a) where
-	signalNameKind wire = (name,kind)
-		where
-			kind = if width == 1 then BitSignal else BusSignal width
-			width = wireBusSize wire
-			name = case wire of
-				Wire (_, WIdent _ Nothing i) -> "generated_temporary_name_"++show i
-				Wire (_, WIdent special (Just n) i) -> concat [n,"_",show i]
+signalNameKind :: SizedWireE -> (String, SignalKind)
+signalNameKind (size, e) = (name,kind)
+	where
+		kind = if size == 1 then BitSignal else BusSignal size
+		name = case e of
+			WIdent _ Nothing i -> "generated_temporary_name_"++show i
+			WIdent special (Just n) i
+				| special -> n
+				| otherwise -> concat [n,"_",show i]
 
 
-class HDLSignals a where
-	signalsWires :: a -> [(String,SignalKind)]
-instance HDLSignals Nil where
-	signalsWires Nil = []
-instance (HDLSignal a, HDLSignals as) => HDLSignals (a :. as) where
-	signalsWires (w :. ws) = signalNameKind w : signalsWires ws
+signalsWires :: [SizedWireE] -> [(String, SignalKind)]
+signalsWires = map signalNameKind
 
 class HDLOp op where
 	opArgs :: WiresList as => op clk ty -> as
@@ -363,18 +382,17 @@ wireClock w = clockValue
 data NetlistOp domain where
  	-- Latching wires. First comes default
 	Register :: (ClockAllowed c clocks, BitRepr a, Show a) =>
-		a -> Wire c a -> Wire c a -> NetlistOp clocks
+		c -> a -> SizedWireE -> SizedWireE -> NetlistOp clocks
 
 
 	-- Assign dest what
 	-- dest <= what;
-	Assign :: BitRepr ty => Wire c ty -> Wire c ty -> NetlistOp clocks
+	Assign :: SizedWireE -> SizedWireE -> NetlistOp clocks
 
 	-- Instance ent
 	-- entity ent port map (...);
-	Instance :: (Instantiable entity, HDLSignals ins, HDLSignals outs
-		, EntityIns entity ~ ins, EntityOuts entity ~ outs) => 
-		entity -> ins -> outs -> NetlistOp clocks
+	Instance :: Instantiable entity => 
+		entity -> [SizedWireE] -> [SizedWireE] -> NetlistOp clocks
 
 -- |Netlist type.
 data Netlist clocks = Netlist { netlistOperations :: [NetlistOp clocks] }
@@ -397,6 +415,13 @@ mkWire name = do
 
 tempWire :: BitRepr a => NLM clocked (Wire c a)
 tempWire = mkWire Nothing
+
+class HDLSignals a where
+	toSizedWireEList :: a -> [SizedWireE]
+instance HDLSignals Nil where
+	toSizedWireEList _ = []
+instance HDLSignals as => HDLSignals (Wire c ty :. as) where
+	toSizedWireEList (Wire se :. as) = se : toSizedWireEList as
 
 class (ClockList (EntityClocks entity)
 	, HDLSignals (EntityIns entity)
@@ -642,11 +667,13 @@ class GenHDL a where
 	generateHDL :: a -> HDLGen ()
 
 names :: HDLSignals s => s -> [String]
-names s = map fst $ signalsWires s
-entityPortsList dir signals = (
+names s = map fst $ signalsWires $ toSizedWireEList s
+entityPortsList :: HDLSignals s => String -> s -> ([String],[(String, String)])
+entityPortsList dir signals' = (
 			 map fst wiresKinds
 			,map (\(name,kind) -> (name,unwords [name,":",dir,vhdlType kind])) wiresKinds)
 			where
+				signals = toSizedWireEList signals'
 				wiresKinds = signalsWires signals
 				vhdlType BitSignal = "bit"
 				vhdlType (BusSignal width) =
@@ -692,13 +719,12 @@ generateHDLForEntity name index ins outs clocks netlist = do
 			return ()
 		declareOperationSignals :: NetlistOp domain -> HDLGen ()
 		declareOperationSignals op = generateVHDLDeclarations $ case op of
-			Register _ wa wb -> signalsWires $ wa :. Nil
-			Assign wa op -> signalsWires $ wa :. Nil
+			Register c _ wa wb -> signalsWires [wa]
+			Assign wa op -> signalsWires [wa]
 			Instance entity ins outs -> signalsWires outs
 		vhdlOperation :: NetlistOp domain -> HDLGen ()
 		vhdlOperation op = case op of
-			Register def wa wb -> do
-				let c = wireClock wa
+			Register c def wa wb -> do
 				let cn = clockName c
 				let edge = (if clockFrontEdge c then "rising_edge" else "falling_edge")
 					++"("++cn++")"
@@ -710,7 +736,7 @@ generateHDLForEntity name index ins outs clocks netlist = do
 				generateLine $ "begin"
 				generateNest $ do
 					generateLine $ unwords ["if",resetFunc, "then"]
-					generateNest $ vhdlOperation (Assign wa (constant def))
+					generateNest $ vhdlOperation (Assign wa (bitVectorSize def, WConst $ toBitVector def))
 					generateLine $ unwords ["elsif",edge, "then"]
 					generateNest $ vhdlOperation (Assign wa wb)
 					generateLine "end if;"
@@ -721,10 +747,10 @@ generateHDLForEntity name index ins outs clocks netlist = do
 					,opToHDL VHDL op, ";"]
 			Instance entity ins outs -> do
 				let (eins, eouts, eclks) = getInputsOuputsClocks entity
-				let insNames = names ins
-				let outsNames = names outs
-				let einsNames = names eins
-				let eoutsNames = names eouts
+				let insNames = map fst $ signalsWires ins
+				let outsNames = map fst $ signalsWires outs
+				let einsNames = map fst $ signalsWires $ toSizedWireEList eins
+				let eoutsNames = map fst $ signalsWires $ toSizedWireEList eouts
 				let clocks = nub $ clockListClocks eclks
 				let resets = nub $ clockListResets eclks
 				let connect a b = a ++" => " ++ b
@@ -895,29 +921,29 @@ addNetlistOperation op =
 	  nlmsNetlist = Netlist $ op : netlistOperations (nlmsNetlist nlms)
 	}
 register :: (ClockAllowed c clocks, BitRepr a, Show a) => a -> Wire c a -> NLM clocks (Wire c a)
-register resetValue computedValue = do
-	w <- tempWire
+register resetValue inp@(~(Wire computedValue)) = do
+	w@(~(Wire se)) <- tempWire
 	modify $ \nlms -> nlms {
-		  nlmsNetlist = Netlist (Register resetValue w computedValue : netlistOperations (nlmsNetlist nlms))
+		  nlmsNetlist = Netlist (Register (wireClock inp) resetValue se computedValue : netlistOperations (nlmsNetlist nlms))
 		}
 	return w
 
 instantiate :: (Instantiable entity, ClockSubset (EntityClocks entity) clocks
-	, WiresList (EntityIns entity), WiresList (EntityOuts entity)) =>
+	, WiresList (EntityIns entity), WiresList (EntityOuts entity), HDLSignals (EntityIns entity), HDLSignals (EntityOuts entity)) =>
 	entity -> EntityIns entity -> NLM clocks (EntityOuts entity)
 instantiate entity ins = do
 	outs <- mkWireList Nothing
-	addNetlistOperation $ Instance entity ins outs
+	addNetlistOperation $ Instance entity (toSizedWireEList ins) (toSizedWireEList outs)
 	return outs
 
 assignWire :: (BitRepr ty) => Wire c ty -> NLM registers (Wire c ty)
 assignWire what = do
 	assignFlattened what
 
-assignWithForcedCopy n wire = do
-	t <- mkWire n
-	addNetlistOperation $ Assign t wire
-	return t
+assignWithForcedCopy n ~(Wire se) = do
+	w@(~(Wire t)) <- mkWire n
+	addNetlistOperation $ Assign t se
+	return w
 
 assignFlattened :: (BitRepr ty) => Wire c ty -> NLM registers (Wire c ty)
 assignFlattened w@(Wire (sz, WIdent _ _ _)) = return w
@@ -964,7 +990,7 @@ instance WireOpList Nil where
 instance (WireOpList xs, BitRepr x
 	, Nat (Plus (BitVectorSize x) (BitVectorSize (WireOpListTypes xs)))) => WireOpList (Wire c x :. xs) where
 	type WireOpListTypes (Wire c x :. xs) = x :. WireOpListTypes xs
-	opsToHDL hdl (a :. as) = opToHDL hdl a : opsToHDL hdl as
+	opsToHDL hdl (Wire a :. as) = opToHDL hdl a : opsToHDL hdl as
 
 type family SplitProjection c w
 class BitRepr w => SplitWires w where
@@ -988,7 +1014,7 @@ instance (BitRepr a, BitRepr b, BitRepr (a,b)) => SplitWires (a,b) where
 splitWires2 :: (BitRepr a, BitRepr b, BitRepr (a,b)) => Wire clk (a,b) -> (Wire clk a, Wire clk b)
 splitWires2 = splitWires
 
-$(liftM concat $ forM [3..4] $ \n -> let
+$(liftM concat $ forM [3..16] $ \n -> let
 		typeNames' = map (\i -> TH.mkName ("t_"++show i)) [1..n]
 		typeNames = map TH.VarT typeNames'
 		ty = foldl TH.AppT (TH.TupleT n) typeNames

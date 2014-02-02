@@ -29,7 +29,9 @@ reifyGenerateMakeMatch names = liftM concat $ mapM checkReifyGenerate names
 				TyConI dec -> generateMakeMatchGen dec
 				_ -> error $ show n ++ " does not reify to type declaration."
 
-logGen s = runIO $ appendFile "gen" $ s++"\n"
+logGen s =
+	return ()
+	-- runIO $ appendFile "gen" $ s++"\n"
 
 generateMakeMatch dec = liftM (dec:) $ generateMakeMatchGen dec
 
@@ -98,9 +100,9 @@ generateConMakeMatch dataName args selectorIndex c@(NormalC conName types) = do
 		splitAssign = case types of
 			[] -> []
 			[_] -> [LetS
-                                [ValD (VarP $ head aws) (NormalB $ castWires $ extendZero asV) []]]
+				[ValD (VarP $ head aws) (NormalB $ castWires $ extendZero asV) []]]
 			xs -> [LetS
-                                [ ValD argumentsWiresP (NormalB $ castWires $ extendZero asV) []
+				[ ValD argumentsWiresP (NormalB $ castWires $ extendZero asV) []
 				, ValD (TupP $ map VarP aws) (NormalB $ splitWiresN argumentsWiresV) []]]
 		consT a b = ConT (mkName ":.") `AppT` a `AppT` b
 		consE a b = ConE (mkName ":.") `AppE` a `AppE` b
@@ -412,7 +414,7 @@ generateBitRepr dataName argVars conses = return [bitReprInstance, algTypeEncIns
 
 		nx = mkName "x"
 		vx = VarE nx
-                toBitVector = FunD (mkName "toBitVector") [Clause [VarP nx] (NormalB toBitVectorCase) []]
+		toBitVector = FunD (mkName "toBitVector") [Clause [VarP nx] (NormalB toBitVectorCase) []]
 		toBitVectorCase = CaseE vx $ zipWith toBitVectorConsMatch [0..] conses
 		nxi = zipWith (\i _ -> mkName $ "x_"++show i) [0..]
 		nsi = zipWith (\i _ -> mkName $ "s_"++show i) [0..]

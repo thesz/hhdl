@@ -1,7 +1,7 @@
 -- Many extensions. I overload many things from Haskell Prelude in the style
 -- of Awesome Prelude. Also you may need a Template Haskell transformations
 -- on declarations, which derives classes and type families instances, etc, etc.
-{-# LANGUAGE TypeFamilies, TypeOperators, FlexibleContexts, DoRec #-}
+{-# LANGUAGE TypeFamilies, TypeOperators, FlexibleContexts, RecursiveDo #-}
 {-# LANGUAGE DeriveDataTypeable, NoImplicitPrelude, TemplateHaskell #-}
 {-# LANGUAGE UndecidableInstances #-}
 
