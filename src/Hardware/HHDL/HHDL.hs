@@ -36,6 +36,9 @@ module Hardware.HHDL.HHDL(
 	, register		-- latched <- register defaultValue wireToLatch
 	, instantiate		-- instantiate entity, literally. outputs <- instantiate entity inputs
 	, constant		-- convert Haskell value (BitRepr one) into wire.
+	, extendZero
+	, extendOnes
+	, extendSign
 	, writeHDLText		-- write HDL text of an entity.
 	, match			-- match expression against list of patterns.
 	, (-->)			-- combine pattern and netlists.
@@ -138,7 +141,21 @@ data HDL = VHDL | Verilog
 	deriving (Prelude.Eq, Prelude.Ord, Show)
 
 exprFlatten :: SizedWireE -> NLM clocks SizedWireE
-exprFlatten sizedExpr = return sizedExpr
+exprFlatten sizedExpr@(size, expr) = case expr of
+	WIdent	_ _ _ -> return sizedExpr
+	WConst	_ -> return sizedExpr
+	WConcat	concats -> do
+		concats' <- mapM exprFlatten concats
+		assign $ WConcat concats
+	WBin	op a b -> liftM2 (WBin op) (exprFlatten a) (exprFlatten b) >>= assign
+	WUn	op a -> liftM (WUn op) (exprFlatten a) >>= assign
+	WSlice	e ofs -> liftM (flip WSlice ofs) (exprFlatten e) >>= assign
+	WSelect	c t f -> liftM3 WSelect (exprFlatten c) (exprFlatten t) (exprFlatten f) >>= assign
+	where
+		assign expr = do
+			t <- mkIdentE Nothing
+			addNetlistOperation $ Assign (size, t) (size, expr)
+			return (size, t)
 
 mkWireFromE :: BitRepr a => WireE -> Wire c a
 mkWireFromE e = r
@@ -162,6 +179,13 @@ class BitRepr (WireOpType op) => WireOp op where
 	opTypeSize op = bitVectorSize (opType op)
 -}
 
+identName :: Bool -> Maybe String -> Int -> String
+identName special name ix = case name of
+	Nothing -> "generated_hhdl_name_"++show ix
+	Just n
+		| special -> n
+		| otherwise -> n ++"_"++show ix
+
 opToHDL :: HDL -> SizedWireE -> String
 opToHDL hdl expr = exprHDL expr
 	where
@@ -169,21 +193,22 @@ opToHDL hdl expr = exprHDL expr
 			| n < 1 = ""
 			| otherwise = bits (n-1) (div b 2) ++ show (mod b 2)
 		exprHDL (size, e) = case e of
-			WIdent	special name ix -> nameString
-				where
-					nameString = case name of
-						Nothing -> "generated_hhdl_name_"++show ix
-						Just n
-							| special -> n
-							| otherwise -> n ++"_"++show ix
+			WIdent	special name ix -> identName special name ix
 
 			WConst	i -> case hdl of
 				Verilog -> error "wconst!"
-				VHDL -> show $ bits size i
+				VHDL -> (if size < 2 then ('\'':) . (++"'") . init . tail else id) $ show $ bits size i
 			WConcat	exprs -> case hdl of
 				Verilog -> concat ["{", intercalate ", " $ map exprHDL exprs, "}"]
-			WBin	op a b -> unwords [exprHDL a, hdlOp, exprHDL b]
+			WBin	op a b
+				| specialCase -> concat [funcName, "(", exprHDL a,", ", exprHDL b, ")"]
+				| otherwise -> unwords [exprHDL a, hdlOp, exprHDL b]
 				where
+					specialCase = (hdl, op) `elem` [(VHDL, Equal), (VHDL, NEqual)]
+					funcName = case op of
+						Equal -> "bit_equality"
+						NEqual -> "bit_inequality"
+						op -> error $ "internal error: not funcname for "++show op
 					hdlOp = case (hdl, op) of
 						(_,Plus) -> "+"
 						(_,Minus) -> "-"
@@ -207,11 +232,11 @@ opToHDL hdl expr = exprHDL expr
 				e -> error $ "unhandled extension combination "++show e
 			WSlice	e@(len,_) from -> case hdl of
 				Verilog
-					| len < 2 -> concat [exprHDL e, "[",show from,"]"]
-					| otherwise -> concat [exprHDL e, "[",show (from+len-1),":", show from,"]"]
+					| size < 2 -> concat [exprHDL e, "(",show from,")"]
+					| otherwise -> concat [exprHDL e, "[",show (from+size-1),":", show from,"]"]
 				VHDL
-					| len < 2 -> concat [exprHDL e, "(",show from,")"]
-					| otherwise -> concat [exprHDL e, "[",show (from+len-1)," downto ", show from,"]"]
+					| size < 2 -> concat [exprHDL e, "(",show from,")"]
+					| otherwise -> concat [exprHDL e, "(",show (from+size-1)," downto ", show from,")"]
 			WSelect	c t e -> case hdl of
 				Verilog -> unwords [exprHDL c,"?", exprHDL t,":", exprHDL e]
 				VHDL -> concat ["select_func(",exprHDL c,", ", exprHDL t,", ", exprHDL e,")"]
@@ -320,10 +345,7 @@ signalNameKind (size, e) = (name,kind)
 	where
 		kind = if size == 1 then BitSignal else BusSignal size
 		name = case e of
-			WIdent _ Nothing i -> "generated_temporary_name_"++show i
-			WIdent special (Just n) i
-				| special -> n
-				| otherwise -> concat [n,"_",show i]
+			WIdent special n i -> identName special n i
 
 
 signalsWires :: [SizedWireE] -> [(String, SignalKind)]
@@ -407,11 +429,15 @@ emptyNLMS = NLMS (Netlist []) 0
 
 type NLM clocked a = State (NLMS clocked) a
 
-mkWire :: BitRepr a => Maybe String -> NLM clocked (Wire c a)
-mkWire name = do
+mkIdentE :: Maybe String -> NLM clocked WireE
+mkIdentE name = do
 	n <- liftM nlmsCounter get
 	modify $ \nlms -> nlms { nlmsCounter = n+1 }
-	return $ mkWireFromE $ WIdent False name n
+	return $ WIdent False name n
+
+mkWire :: BitRepr a => Maybe String -> NLM clocked (Wire c a)
+mkWire name = do
+	liftM mkWireFromE $ mkIdentE name
 
 tempWire :: BitRepr a => NLM clocked (Wire c a)
 tempWire = mkWire Nothing
@@ -833,14 +859,14 @@ generateHDLForEntity name index ins outs clocks netlist = do
 			, "    end if;"
 			, "end function bit_equality;"
 			, ""
-			, "pure function bit_equality(a, b : in unsigned) return bit is"
+			, "pure function bit_inequality(a, b : in unsigned) return bit is"
 			, "begin"
 			, "    if a = b then"
-			, "        return '1';"
-			, "    else"
 			, "        return '0';"
+			, "    else"
+			, "        return '1';"
 			, "    end if;"
-			, "end function bit_equality;"
+			, "end function bit_inequality;"
 			, ""
 			]
 
@@ -951,11 +977,28 @@ assignFlattened w@(Wire e) = do
 	e <- exprFlatten e
 	assignWithForcedCopy Nothing (Wire e)
 
+anyExtend :: (Nat src, Nat dest) => Maybe WireE -> Wire c (BV src) -> Wire c (BV dest)
+anyExtend mbExt src@(Wire what@(sizeWhat, _))
+	| sizeWhat > sizeTo = mkWireFromE $ WSlice what 0
+	| sizeWhat == sizeTo = Wire what
+	| otherwise = res
+	where
+		(Wire (sizeTo, _)) = res
+		ext = case mbExt of
+			Nothing -> WSlice what (sizeWhat-1)
+			Just e -> e
+		extSize = sizeTo - sizeWhat
+		extension = (extSize, WConcat (replicate extSize (1,ext)))
+		res = mkWireFromE $ WConcat [extension, what]
+
 extendZero :: (Nat src, Nat dest) => Wire c (BV src) -> Wire c (BV dest)
-extendZero (Wire what) = mkWireFromE (WUn (Extend ExtZero) what)
+extendZero what = anyExtend (Just $ WConst 0) what
+
+extendOnes :: (Nat src, Nat dest) => Wire c (BV src) -> Wire c (BV dest)
+extendOnes what = anyExtend (Just $ WConst 1) what
 
 extendSign :: (Nat src, Nat dest) => Wire c (BV src) -> Wire c (BV dest)
-extendSign (Wire what) = mkWireFromE (WUn (Extend ExtSign) what)
+extendSign what = anyExtend Nothing what
 
 castWires :: (BitRepr src, BitRepr res, BitVectorSize src ~ BitVectorSize res) =>
 	Wire c src -> Wire c res
